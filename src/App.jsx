@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
   getSession, createSession, addPollToSession, setSessionIndex, setSessionActive,
-  getResponses, addResponse, loadTemplates, saveTemplate, deleteTemplate,
+  getResponses, addResponse, loadTemplates, saveTemplate, deleteTemplate, revealPollAnswer,
 } from './lib/db';
 
 function makeCode() {
@@ -22,6 +22,20 @@ const STATIC_URL = buildStaticUrl();
 const STATIC_QR_SRC = STATIC_URL
   ? `https://api.qrserver.com/v1/create-qr-code/?size=160x160&margin=8&data=${encodeURIComponent(STATIC_URL)}`
   : null;
+
+// The public QR/link never includes ?present=1, so scanning it only ever
+// reaches the audience join screen — "Present a Session" isn't shown or
+// reachable at all unless you're on the separate bookmarked presenter URL.
+// This is obscurity, not real access control (there's no login system —
+// see README), but it stops attendees from stumbling into presenter controls.
+function isPresenterLink() {
+  try {
+    return new URLSearchParams(window.location.search).get('present') === '1';
+  } catch (e) {
+    return false;
+  }
+}
+const IS_PRESENTER_LINK = isPresenterLink();
 
 // ---------- AMERIND brand tokens ----------
 // Navy #003882 and accent blue #2e75b6 are the only brand colors.
@@ -100,7 +114,7 @@ const LIKERT_LABELS = ['Strongly Disagree', 'Disagree', 'Neutral', 'Agree', 'Str
 
 // ---------- app shell ----------
 export default function App() {
-  const [role, setRole] = useState(null); // 'present' | 'join'
+  const [role, setRole] = useState(IS_PRESENTER_LINK ? null : 'join'); // 'present' | 'join'
 
   return (
     <div style={{
@@ -146,7 +160,7 @@ export default function App() {
                 style={{ borderRadius: 6, border: `1px solid ${COLORS.panelEdge}` }}
               />
             )}
-            {role && (
+            {IS_PRESENTER_LINK && role && (
               <button
                 onClick={() => setRole(null)}
                 style={{ background: 'none', border: 'none', color: COLORS.textDim, fontSize: 13, cursor: 'pointer', fontFamily: fontBody }}
@@ -463,6 +477,7 @@ function Presenter() {
   const [showAdd, setShowAdd] = useState(false);
   const [correctAnswer, setCorrectAnswer] = useState(null);
   const [projecting, setProjecting] = useState(false);
+  const [draftPolls, setDraftPolls] = useState([]);
   const [showResume, setShowResume] = useState(false);
   const [resumeInput, setResumeInput] = useState('');
   const [resumeError, setResumeError] = useState('');
@@ -487,14 +502,31 @@ function Presenter() {
 
   const finalOptions = (t, opts) => (t === 'mc' || t === 'likert') ? opts.filter(o => o.trim()) : [];
 
+  const currentDraft = () => ({
+    type, question: question.trim(), options: finalOptions(type, options),
+    correctAnswer: type === 'mc' ? (correctAnswer || null) : null,
+  });
+
+  const addDraftPoll = () => {
+    setDraftPolls([...draftPolls, currentDraft()]);
+    setQuestion(''); setOptions(freshOptions()); setType('mc'); setCorrectAnswer(null);
+  };
+
+  const removeDraftPoll = (idx) => {
+    setDraftPolls(draftPolls.filter((_, i) => i !== idx));
+  };
+
   const launch = async () => {
+    const pending = question.trim() ? [currentDraft()] : [];
+    const polls = [...draftPolls, ...pending];
+    if (polls.length === 0) { setStatus('Add at least one question before launching.'); return; }
     setStatus('Creating session…');
     const newCode = makeCode();
-    const poll = { type, question: question.trim(), options: finalOptions(type, options), correctAnswer: type === 'mc' ? (correctAnswer || null) : null };
-    const sess = await createSession(newCode, poll);
+    const sess = await createSession(newCode, polls);
     if (!sess) { setStatus('Session could not be created — please try again.'); return; }
     setCode(newCode);
     setSession(sess);
+    setDraftPolls([]);
     setStage('live');
   };
 
@@ -518,6 +550,14 @@ function Presenter() {
     await setSessionActive(code, false);
     setSession({ ...session, active: false });
     if (pollTimer.current) clearInterval(pollTimer.current);
+  };
+
+  const revealAnswer = async () => {
+    if (!currentPoll) return;
+    const ok = await revealPollAnswer(currentPoll.id);
+    if (!ok) return;
+    const polls = session.polls.map(p => p.id === currentPoll.id ? { ...p, revealed: true } : p);
+    setSession({ ...session, polls });
   };
 
   const downloadResults = async () => {
@@ -563,7 +603,7 @@ function Presenter() {
     if (pollTimer.current) clearInterval(pollTimer.current);
     setStage('build'); setCode(null); setSession(null); setResponses([]);
     setQuestion(''); setOptions(freshOptions()); setType('mc'); setShowAdd(false);
-    setCorrectAnswer(null); setProjecting(false);
+    setCorrectAnswer(null); setProjecting(false); setDraftPolls([]);
   };
 
   const currentPoll = session ? session.polls[session.currentIndex] : null;
@@ -620,14 +660,53 @@ function Presenter() {
           </button>
         )}
 
+        {draftPolls.length > 0 && (
+          <Panel style={{ marginBottom: 16 }}>
+            <label style={{ fontSize: 12, color: COLORS.textDim, textTransform: 'uppercase', letterSpacing: 0.5, fontWeight: 700 }}>
+              Questions Queued ({draftPolls.length})
+            </label>
+            <div style={{ display: 'grid', gap: 8, marginTop: 8 }}>
+              {draftPolls.map((p, i) => (
+                <div key={i} style={{
+                  display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                  border: `1px solid ${COLORS.panelEdge}`, borderRadius: 8, padding: '8px 10px',
+                }}>
+                  <div style={{ minWidth: 0 }}>
+                    <span style={{ fontFamily: fontUtility, fontSize: 11, color: COLORS.textDim, marginRight: 8 }}>#{i + 1}</span>
+                    <span style={{ fontSize: 13, fontWeight: 700, color: COLORS.text }}>
+                      {(POLL_TYPES.find(pt => pt.id === p.type) || {}).label}
+                    </span>
+                    <div style={{ fontSize: 12, color: COLORS.textDim, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      {p.question}
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => removeDraftPoll(i)}
+                    aria-label="Remove"
+                    style={{ background: 'none', border: 'none', color: COLORS.textDim, cursor: 'pointer', fontSize: 16, flexShrink: 0, marginLeft: 8 }}
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
+            </div>
+          </Panel>
+        )}
+
         <PollBuilder
           type={type} onTypeChange={handleTypeChange}
           question={question} setQuestion={setQuestion}
           options={options} setOptions={setOptions}
           correctAnswer={correctAnswer} setCorrectAnswer={setCorrectAnswer}
-          onSubmit={launch}
-          submitLabel="Launch Session →"
+          onSubmit={addDraftPoll}
+          submitLabel="+ Add to Session"
         />
+
+        <div style={{ marginTop: 4 }}>
+          <Button onClick={launch} disabled={draftPolls.length === 0 && !question.trim()}>
+            Launch Session {draftPolls.length > 0 ? `(${draftPolls.length} Question${draftPolls.length === 1 ? '' : 's'})` : ''} →
+          </Button>
+        </div>
         {status && <div style={{ marginTop: 10, fontSize: 13, color: COLORS.textDim }}>{status}</div>}
       </div>
     );
@@ -673,7 +752,10 @@ function Presenter() {
           <div style={{ fontFamily: fontDisplay, fontWeight: 700, fontSize: 30, color: COLORS.text, marginBottom: 28, lineHeight: 1.25 }}>
             {currentPoll.question}
           </div>
-          <ResultsView type={currentPoll.type} options={currentPoll.options} responses={responses} correctAnswer={currentPoll.correctAnswer} />
+          <ResultsView type={currentPoll.type} options={currentPoll.options} responses={responses} correctAnswer={currentPoll.correctAnswer} revealed={currentPoll.revealed} />
+          {currentPoll.type === 'mc' && currentPoll.correctAnswer && !currentPoll.revealed && (
+            <Button onClick={revealAnswer} style={{ marginTop: 16 }}>Reveal Correct Answer</Button>
+          )}
         </Panel>
 
         <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 18 }}>
@@ -724,7 +806,10 @@ function Presenter() {
         <div style={{ fontFamily: fontDisplay, fontWeight: 700, fontSize: 18, margin: '10px 0 18px', color: COLORS.text }}>
           {currentPoll.question}
         </div>
-        <ResultsView type={currentPoll.type} options={currentPoll.options} responses={responses} correctAnswer={currentPoll.correctAnswer} />
+        <ResultsView type={currentPoll.type} options={currentPoll.options} responses={responses} correctAnswer={currentPoll.correctAnswer} revealed={currentPoll.revealed} />
+        {currentPoll.type === 'mc' && currentPoll.correctAnswer && !currentPoll.revealed && (
+          <Button onClick={revealAnswer} style={{ marginTop: 16 }}>Reveal Correct Answer</Button>
+        )}
 
         <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 20, paddingTop: 16, borderTop: `1px solid ${COLORS.panelEdge}` }}>
           <Button variant="ghost" onClick={() => goTo(session.currentIndex - 1)} disabled={session.currentIndex === 0}>← Previous</Button>
@@ -761,7 +846,7 @@ function Presenter() {
 }
 
 // ---------- results rendering ----------
-function ResultsView({ type, options, responses, correctAnswer }) {
+function ResultsView({ type, options, responses, correctAnswer, revealed }) {
   if (responses.length === 0) {
     return <div style={{ color: COLORS.textDim, fontSize: 14, fontStyle: 'italic' }}>Waiting for responses…</div>;
   }
@@ -772,10 +857,21 @@ function ResultsView({ type, options, responses, correctAnswer }) {
     responses.forEach(r => { if (counts[r.value] !== undefined) counts[r.value]++; });
     const max = Math.max(1, ...Object.values(counts));
     const total = responses.length;
-    const pctCorrect = correctAnswer ? Math.round(((counts[correctAnswer] || 0) / total) * 100) : null;
+    const showAnswer = !!correctAnswer && !!revealed;
+    const pctCorrect = showAnswer ? Math.round(((counts[correctAnswer] || 0) / total) * 100) : null;
     return (
       <div>
-        {correctAnswer && (
+        {correctAnswer && !revealed && (
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14, padding: '8px 12px',
+            background: `${COLORS.textDim}0d`, border: `1px solid ${COLORS.panelEdge}`, borderRadius: 8,
+          }}>
+            <span style={{ fontSize: 12, color: COLORS.textDim, fontStyle: 'italic' }}>
+              Quiz mode — correct answer hidden until you reveal it
+            </span>
+          </div>
+        )}
+        {showAnswer && (
           <div style={{
             display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14, padding: '8px 12px',
             background: `${COLORS.live}12`, border: `1px solid ${COLORS.live}33`, borderRadius: 8,
@@ -786,7 +882,7 @@ function ResultsView({ type, options, responses, correctAnswer }) {
         )}
         <div style={{ display: 'grid', gap: 12 }}>
           {options.map(opt => {
-            const isCorrect = correctAnswer === opt;
+            const isCorrect = showAnswer && correctAnswer === opt;
             return (
               <div key={opt}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 4 }}>
