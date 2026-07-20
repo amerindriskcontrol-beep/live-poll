@@ -21,6 +21,7 @@ function shapePoll(row) {
     question: row.question,
     options: row.options || [],
     correctAnswer: row.correct_answer || null,
+    revealed: !!row.revealed,
   };
 }
 
@@ -51,13 +52,14 @@ export async function getSession(code) {
   };
 }
 
-export async function createSession(code, poll) {
+export async function createSession(code, polls) {
   const { error: sErr } = await supabase.from('sessions').insert({ code, active: true, current_index: 0 });
   if (sErr) return null;
-  const { error: pErr } = await supabase.from('polls').insert({
-    session_code: code, idx: 0, type: poll.type, question: poll.question,
+  const rows = polls.map((poll, idx) => ({
+    session_code: code, idx, type: poll.type, question: poll.question,
     options: poll.options, correct_answer: poll.correctAnswer,
-  });
+  }));
+  const { error: pErr } = await supabase.from('polls').insert(rows);
   if (pErr) return null;
   return getSession(code);
 }
@@ -79,6 +81,11 @@ export async function setSessionIndex(code, idx) {
 
 export async function setSessionActive(code, active) {
   const { error } = await supabase.from('sessions').update({ active }).eq('code', code);
+  return !error;
+}
+
+export async function revealPollAnswer(pollId) {
+  const { error } = await supabase.from('polls').update({ revealed: true }).eq('id', pollId);
   return !error;
 }
 
