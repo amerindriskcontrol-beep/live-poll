@@ -606,6 +606,26 @@ function Presenter() {
     setCorrectAnswer(null); setProjecting(false); setDraftPolls([]);
   };
 
+  // Same question set, brand-new code, zero responses. Deliberately does NOT
+  // reuse the old code in place — an attendee whose device already marked a
+  // poll "answered" would be stuck seeing "waiting for next question" with
+  // no way to resubmit, since that's tracked client-side per poll id.
+  const reuseAsNewSession = async () => {
+    if (!session) return;
+    const clonedPolls = session.polls.map(p => ({
+      type: p.type, question: p.question, options: p.options, correctAnswer: p.correctAnswer,
+    }));
+    const newCode = makeCode();
+    const sess = await createSession(newCode, clonedPolls);
+    if (!sess) return;
+    if (pollTimer.current) clearInterval(pollTimer.current);
+    setCode(newCode);
+    setSession(sess);
+    setResponses([]);
+    setShowAdd(false);
+    setProjecting(false);
+  };
+
   const currentPoll = session ? session.polls[session.currentIndex] : null;
 
   useEffect(() => {
@@ -838,7 +858,8 @@ function Presenter() {
           <Button variant="ghost" onClick={() => setProjecting(true)}>🖥 Projector View</Button>
           <Button variant="ghost" onClick={downloadResults}>⬇ Download Results (CSV)</Button>
           {session.active && <Button variant="danger" onClick={endSession}>End Session</Button>}
-          <Button variant="ghost" onClick={newSession}>New Session</Button>
+          <Button variant="ghost" onClick={reuseAsNewSession}>↻ Reuse Questions, New Session</Button>
+          <Button variant="ghost" onClick={newSession}>New Session (Blank)</Button>
         </div>
       )}
     </div>
